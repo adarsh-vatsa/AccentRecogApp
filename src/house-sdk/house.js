@@ -79,7 +79,7 @@
 
   function memberList() {
     return members.map(function (m) {
-      return { id: m.id, name: m.name, username: m.username, role: m.role, online: online.has(m.id) };
+      return { id: m.id, name: m.name, role: m.role, online: online.has(m.id) };
     });
   }
 
@@ -156,7 +156,7 @@
       return ctx && { id: ctx.house.id, name: ctx.house.name };
     },
     get me() {
-      return ctx && { id: ctx.me.id, name: ctx.me.name, username: ctx.me.username };
+      return ctx && { id: ctx.me.id, name: ctx.me.name };
     },
     get members() {
       return memberList();

@@ -7,6 +7,14 @@ export class RateLimiter {
     private readonly refillPerSecond: number,
   ) {}
 
+  /** Would a take of `cost` succeed right now? Doesn't consume anything. */
+  peek(key: string, cost = 1): boolean {
+    const bucket = this.buckets.get(key);
+    if (!bucket) return this.capacity >= cost;
+    const elapsed = (Date.now() - bucket.updated) / 1000;
+    return Math.min(this.capacity, bucket.tokens + elapsed * this.refillPerSecond) >= cost;
+  }
+
   take(key: string, cost = 1): boolean {
     const now = Date.now();
     const bucket = this.buckets.get(key) ?? { tokens: this.capacity, updated: now };

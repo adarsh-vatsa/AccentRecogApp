@@ -18,8 +18,8 @@ const house = await House.ready; // resolves once the app has connected this hou
 ## Identity and members
 
 - `house.house` → `{ id, name }` (the house's name)
-- `house.me` → `{ id, name, username }` (the person viewing; every viewer gets their own `me`)
-- `house.members` → `[{ id, name, username, role: "owner"|"member", online: boolean }]`
+- `house.me` → `{ id, name }` (the person viewing; every viewer gets their own `me`)
+- `house.members` → `[{ id, name, role: "owner"|"member", online: boolean }]`
 - `house.onMembers(fn)` → calls `fn(members)` whenever someone joins, leaves, comes online or goes offline. Returns an unsubscribe function.
 
 ## Chat (persistent messages)

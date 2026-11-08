@@ -12,7 +12,10 @@ export interface PublicUser {
   name: string;
 }
 
-export interface PublicMember extends PublicUser {
+/** What houses (untrusted code) learn about members: no usernames, which are login names. */
+export interface PublicMember {
+  id: string;
+  name: string;
   role: "owner" | "member";
 }
 
@@ -141,11 +144,32 @@ export class HouseService {
   members(houseId: string): PublicMember[] {
     const rows = this.db
       .prepare(
-        `SELECT u.id, u.username, u.display_name, m.role FROM memberships m
+        `SELECT u.id, u.display_name, m.role FROM memberships m
          JOIN users u ON u.id = m.user_id WHERE m.house_id = ? ORDER BY m.joined_at`,
       )
-      .all(houseId) as Array<{ id: string; username: string; display_name: string; role: "owner" | "member" }>;
-    return rows.map((r) => ({ id: r.id, username: r.username, name: r.display_name, role: r.role }));
+      .all(houseId) as Array<{ id: string; display_name: string; role: "owner" | "member" }>;
+    return rows.map((r) => ({ id: r.id, name: r.display_name, role: r.role }));
+  }
+
+  private isBanned(houseId: string, userId: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM bans WHERE house_id = ? AND user_id = ?").get(houseId, userId));
+  }
+
+  listBans(houseId: string): Array<{ id: string; name: string; at: number }> {
+    return this.db
+      .prepare(
+        `SELECT u.id, u.display_name AS name, b.created_at AS at FROM bans b
+         JOIN users u ON u.id = b.user_id WHERE b.house_id = ? ORDER BY b.created_at DESC`,
+      )
+      .all(houseId) as Array<{ id: string; name: string; at: number }>;
+  }
+
+  unban(houseId: string, userId: string): void {
+    this.db.prepare("DELETE FROM bans WHERE house_id = ? AND user_id = ?").run(houseId, userId);
+  }
+
+  revokeInvites(houseId: string): number {
+    return Number(this.db.prepare("DELETE FROM invites WHERE house_id = ?").run(houseId).changes);
   }
 
   createInvite(houseId: string, userId: string): { token: string; expiresAt: number } {
@@ -160,10 +184,15 @@ export class HouseService {
     return { token, expiresAt };
   }
 
+  /** An invite is live only while unexpired, not used up, and its creator is still a member. */
   private liveInvite(token: string): { house_id: string; created_by: string; token_hash: string } | undefined {
     if (!/^[A-Za-z0-9_-]{20,64}$/.test(token)) return undefined;
     return this.db
-      .prepare("SELECT house_id, created_by, token_hash FROM invites WHERE token_hash = ? AND expires_at > ? AND uses < max_uses")
+      .prepare(
+        `SELECT i.house_id, i.created_by, i.token_hash FROM invites i
+         JOIN memberships m ON m.house_id = i.house_id AND m.user_id = i.created_by
+         WHERE i.token_hash = ? AND i.expires_at > ? AND i.uses < i.max_uses`,
+      )
       .get(sha256(token), Date.now()) as { house_id: string; created_by: string; token_hash: string } | undefined;
   }
 
@@ -171,6 +200,7 @@ export class HouseService {
     const invite = this.liveInvite(token);
     const house = invite ? this.getHouse(invite.house_id) : undefined;
     if (!invite || !house) throw new HttpError(404, "This invite link is invalid or has expired");
+    if (this.isBanned(house.id, userId)) throw new HttpError(403, "You were removed from this house. Ask the owner to let you back in.");
     const inviter = this.db.prepare("SELECT display_name FROM users WHERE id = ?").get(invite.created_by) as
       | { display_name: string }
       | undefined;
@@ -187,6 +217,9 @@ export class HouseService {
       const invite = this.liveInvite(token);
       if (!invite) throw new HttpError(404, "This invite link is invalid or has expired");
       if (this.membership(invite.house_id, user.id)) return { houseId: invite.house_id, isNew: false };
+      if (this.isBanned(invite.house_id, user.id)) {
+        throw new HttpError(403, "You were removed from this house. Ask the owner to let you back in.");
+      }
       this.db.prepare("UPDATE invites SET uses = uses + 1 WHERE token_hash = ?").run(invite.token_hash);
       this.db
         .prepare("INSERT INTO memberships (house_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)")
@@ -205,8 +238,19 @@ export class HouseService {
     if (actorId !== targetId && membership.role !== "owner") {
       throw new HttpError(403, "Only the house owner can remove people");
     }
-    const res = this.db.prepare("DELETE FROM memberships WHERE house_id = ? AND user_id = ?").run(houseId, targetId);
-    if (res.changes === 0) throw new HttpError(404, "Not a member");
+    const removed = tx(this.db, () => {
+      const res = this.db.prepare("DELETE FROM memberships WHERE house_id = ? AND user_id = ?").run(houseId, targetId);
+      if (res.changes === 0) return false;
+      // Their invite links die with their membership, so they can't walk back in.
+      this.db.prepare("DELETE FROM invites WHERE house_id = ? AND created_by = ?").run(houseId, targetId);
+      if (actorId !== targetId) {
+        this.db
+          .prepare("INSERT OR REPLACE INTO bans (house_id, user_id, banned_by, created_at) VALUES (?, ?, ?, ?)")
+          .run(houseId, targetId, actorId, Date.now());
+      }
+      return true;
+    });
+    if (!removed) throw new HttpError(404, "Not a member");
     this.publish(houseId, "members", this.members(houseId));
     this.publish(houseId, "member.removed", { userId: targetId });
   }
@@ -369,7 +413,10 @@ export class HouseService {
   }
 
   async restore(houseId: string, user: UserRow, targetSha: string): Promise<string> {
-    if (!(await this.repos.hasCommit(houseId, targetSha))) throw new HttpError(404, "Version not found");
+    // Only versions that were actually live can be restored. Unshipped or discarded
+    // builds live in the same repo, but restoring them would bypass ship permissions.
+    const known = this.db.prepare("SELECT 1 FROM versions WHERE house_id = ? AND sha = ?").get(houseId, targetSha);
+    if (!known || !(await this.repos.hasCommit(houseId, targetSha))) throw new HttpError(404, "Version not found");
     return this.repos.withLock(houseId, async () => {
       const live = await this.repos.mainSha(houseId);
       if (live === targetSha) return live;

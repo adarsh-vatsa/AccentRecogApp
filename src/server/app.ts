@@ -35,9 +35,6 @@ const SHELL_FILES: Record<string, { file: string; type: string }> = {
   "/shell/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
   "/shell/bridge.js": { file: "bridge.js", type: "text/javascript; charset=utf-8" },
   "/shell/style.css": { file: "style.css", type: "text/css; charset=utf-8" },
-  "/shell/check-harness.js": { file: "check-harness.js", type: "text/javascript; charset=utf-8" },
-  "/shell/check-harness.css": { file: "check-harness.css", type: "text/css; charset=utf-8" },
-  "/check-harness.html": { file: "check-harness.html", type: "text/html; charset=utf-8" },
 };
 const SPA_ROUTES = [/^\/$/, /^\/house\/[0-9a-f]{16}$/, /^\/invite\/[A-Za-z0-9_-]{1,100}$/];
 
@@ -62,7 +59,8 @@ export function createApp(cfg: Config, opts: { model?: ModelClient; checker?: Ch
   const repos = new Repos(path.join(cfg.dataDir, "houses"));
   const houses = new HouseService(db, repos, cfg);
   const hub = new Hub(db, houses, cfg);
-  const runs = new RunService(db, repos, houses, cfg, opts.model ?? new ClaudeModel(cfg.agent), opts.checker ?? new BrowserChecker(cfg.platformOrigin));
+  const runs = new RunService(db, repos, houses, cfg, opts.model ?? new ClaudeModel(cfg.agent), opts.checker ??
+      new BrowserChecker({ platformOrigin: cfg.platformOrigin, houseScheme: cfg.houseScheme, houseDomain: cfg.houseDomain, sandbox: cfg.checkerSandbox }));
   runs.recover();
   const svc: Services = { cfg, db, repos, houses, hub, runs };
 
@@ -92,7 +90,13 @@ export function createApp(cfg: Config, opts: { model?: ModelClient; checker?: Ch
 
   const platform = http.createServer(async (req, res) => {
     securityHeaders(res);
-    const url = new URL(req.url ?? "/", cfg.platformOrigin);
+    let url: URL;
+    try {
+      url = new URL(req.url ?? "/", cfg.platformOrigin);
+    } catch {
+      res.statusCode = 400;
+      return res.end();
+    }
     const method = req.method ?? "GET";
     const ctx: Ctx = { req, res, url, params: {} };
     try {
@@ -122,9 +126,18 @@ export function createApp(cfg: Config, opts: { model?: ModelClient; checker?: Ch
   });
 
   platform.on("upgrade", (req, socket, head) => {
-    const url = new URL(req.url ?? "/", cfg.platformOrigin);
-    if (url.pathname !== "/ws") return socket.destroy();
-    hub.handleUpgrade(req, socket, head);
+    try {
+      const url = new URL(req.url ?? "/", cfg.platformOrigin);
+      if (url.pathname !== "/ws") return socket.destroy();
+      hub.handleUpgrade(req, socket, head);
+    } catch (err) {
+      console.error("[upgrade]", (err as Error).message);
+      socket.destroy();
+    }
+  });
+  platform.on("clientError", (_err, socket) => {
+    if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+    else socket.destroy();
   });
 
   const house = createHouseServer(cfg, repos);

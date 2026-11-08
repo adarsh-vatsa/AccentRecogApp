@@ -8,8 +8,8 @@ const params = new URLSearchParams(location.hash.slice(1));
 const url = params.get("frame");
 const houseName = params.get("name") || "Test House";
 
-const me = { id: "0000000000000001", name: "Alex Tester", username: "alex" };
-const friend = { id: "0000000000000002", name: "Sam Friend", username: "sam" };
+const me = { id: "0000000000000001", name: "Alex Tester" };
+const friend = { id: "0000000000000002", name: "Sam Friend" };
 const members = [
   { ...me, role: "owner" },
   { ...friend, role: "member" },

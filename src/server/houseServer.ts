@@ -81,6 +81,11 @@ class BlobCache {
   }
   set(key: string, value: Buffer): void {
     if (value.length > this.maxBytes / 8) return;
+    const previous = this.map.get(key);
+    if (previous) {
+      this.map.delete(key);
+      this.bytes -= previous.length;
+    }
     this.map.set(key, value);
     this.bytes += value.length;
     for (const [k, v] of this.map) {
@@ -91,9 +96,29 @@ class BlobCache {
   }
 }
 
+/** Bounds how many git processes file serving can spawn at once. */
+class Semaphore {
+  private waiting: Array<() => void> = [];
+  private active = 0;
+  constructor(private readonly max: number) {}
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active >= this.max) await new Promise<void>((r) => this.waiting.push(r));
+    this.active++;
+    try {
+      return await fn();
+    } finally {
+      this.active--;
+      this.waiting.shift()?.();
+    }
+  }
+}
+
 export function createHouseServer(cfg: Config, repos: Repos): http.Server {
   const csp = houseCsp(cfg);
   const cache = new BlobCache(64 * 1024 * 1024);
+  // Misses are cached too (versions are immutable), so probing for files is cheap.
+  const misses = new Set<string>();
+  const gitSlots = new Semaphore(8);
   const sdkPath = path.join(SDK_DIR, "house.js");
   const domain = cfg.houseDomain.toLowerCase();
 
@@ -149,11 +174,26 @@ export function createHouseServer(cfg: Config, repos: Repos): http.Server {
       if (filePath === "" || filePath.endsWith("/")) filePath += "index.html";
       if (!isValidHousePath(filePath)) return notFound(res);
 
+      // House pages only render inside the app's frame. A top-level visit (someone
+      // opening a leaked frame URL, or a phishing link) gets nothing. Browsers that
+      // send Fetch Metadata mark frame loads as "iframe" and tabs as "document".
+      if (req.headers["sec-fetch-dest"] === "document") {
+        baseHeaders(res);
+        res.statusCode = 403;
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        return res.end("Houses open inside the app.");
+      }
+
       const key = `${grant.houseId}:${grant.sha}:${filePath}`;
+      if (misses.has(key)) return notFound(res);
       let body = cache.get(key);
       if (!body) {
-        const blob = await repos.readFile(grant.houseId, grant.sha, filePath);
-        if (!blob) return notFound(res);
+        const blob = await gitSlots.run(() => repos.readFile(grant.houseId, grant.sha, filePath));
+        if (!blob) {
+          if (misses.size > 50_000) misses.clear();
+          misses.add(key);
+          return notFound(res);
+        }
         body = blob;
         cache.set(key, body);
       }

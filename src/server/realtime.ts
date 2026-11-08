@@ -2,7 +2,7 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import { z } from "zod";
-import { sessionTokenFromRequest, userForSessionToken } from "./auth.ts";
+import { sessionTokenFromRequest, sha256, userForSessionToken } from "./auth.ts";
 import type { Config } from "./config.ts";
 import type { DB, UserRow } from "./db.ts";
 import type { HouseService } from "./houses.ts";
@@ -23,9 +23,16 @@ interface Conn {
   id: number;
   ws: WebSocket;
   user: UserRow;
+  /** Hash of the session this socket was opened with; re-checked on every heartbeat. */
+  sessionHash: string;
   houses: Set<string>;
   alive: boolean;
 }
+
+/** Sockets one account may hold open at once (tabs, devices). */
+const MAX_SOCKETS_PER_USER = 8;
+/** A client that stops reading gets cut off before its queue can eat server memory. */
+const MAX_BUFFERED_BYTES = 1024 * 1024;
 
 const clientMessage = z.discriminatedUnion("t", [
   z.object({ t: z.literal("sub"), house: z.string().regex(idPattern) }),
@@ -65,8 +72,10 @@ export class Hub {
   private rooms = new Map<string, Set<Conn>>();
   private conns = new Set<Conn>();
   private nextId = 1;
-  private general = new RateLimiter(120, 40);
-  private chat = new RateLimiter(10, 1);
+  // All limits are per account, not per socket, so opening more sockets buys nothing.
+  private general = new RateLimiter(240, 80);
+  private chat = new RateLimiter(10, 1); // per account per house
+  private chatGlobal = new RateLimiter(20, 2); // per account across all houses
   private events = new RateLimiter(60, 30);
   private heartbeat: NodeJS.Timeout;
 
@@ -92,12 +101,20 @@ export class Hub {
       socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       return;
     }
-    const user = userForSessionToken(this.db, sessionTokenFromRequest(req));
-    if (!user) {
+    const token = sessionTokenFromRequest(req);
+    const user = userForSessionToken(this.db, token);
+    if (!user || !token) {
       socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n");
       return;
     }
-    this.wss.handleUpgrade(req, socket, head, (ws) => this.accept(ws, user));
+    let open = 0;
+    for (const c of this.conns) if (c.user.id === user.id) open++;
+    if (open >= MAX_SOCKETS_PER_USER) {
+      socket.end("HTTP/1.1 429 Too Many Requests\r\n\r\n");
+      return;
+    }
+    const sessionHash = sha256(token);
+    this.wss.handleUpgrade(req, socket, head, (ws) => this.accept(ws, user, sessionHash));
   }
 
   /** Users currently connected to a house. */
@@ -107,8 +124,8 @@ export class Hub {
     return [...ids];
   }
 
-  private accept(ws: WebSocket, user: UserRow): void {
-    const conn: Conn = { id: this.nextId++, ws, user, houses: new Set(), alive: true };
+  private accept(ws: WebSocket, user: UserRow, sessionHash: string): void {
+    const conn: Conn = { id: this.nextId++, ws, user, sessionHash, houses: new Set(), alive: true };
     this.conns.add(conn);
     ws.on("pong", () => (conn.alive = true));
     ws.on("message", (raw, isBinary) => {
@@ -122,12 +139,22 @@ export class Hub {
     ws.on("error", () => ws.terminate());
   }
 
+  /** Send, unless the client has stopped reading; then drop it. */
+  private deliver(ws: WebSocket, text: string): void {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (ws.bufferedAmount > MAX_BUFFERED_BYTES) {
+      ws.terminate();
+      return;
+    }
+    ws.send(text);
+  }
+
   private send(conn: Conn, msg: unknown): void {
-    if (conn.ws.readyState === WebSocket.OPEN) conn.ws.send(JSON.stringify(msg));
+    this.deliver(conn.ws, JSON.stringify(msg));
   }
 
   private async onMessage(conn: Conn, raw: string): Promise<void> {
-    if (!this.general.take(`c:${conn.id}`)) {
+    if (!this.general.take(`u:${conn.user.id}`)) {
       this.send(conn, { t: "error", error: "Slow down" });
       return;
     }
@@ -171,7 +198,9 @@ export class Hub {
     switch (op as Op) {
       case "chat.send": {
         const a = opSchemas["chat.send"].parse(rawArgs);
-        if (!this.chat.take(`${houseId}:${user.id}`)) throw new HttpError(429, "You're sending messages too fast");
+        if (!this.chat.take(`${houseId}:${user.id}`) || !this.chatGlobal.take(user.id)) {
+          throw new HttpError(429, "You're sending messages too fast");
+        }
         return this.houses.postMessage(houseId, user, a.channel, a.body);
       }
       case "chat.list": {
@@ -184,6 +213,8 @@ export class Hub {
       }
       case "state.list": {
         const a = opSchemas["state.list"].parse(rawArgs);
+        // Lists can be large; charge them like ten ordinary requests.
+        if (!this.general.take(`u:${user.id}`, 10)) throw new HttpError(429, "Slow down");
         return this.houses.listState(houseId, a.prefix);
       }
       case "state.set": {
@@ -197,7 +228,7 @@ export class Hub {
       case "events.emit": {
         const a = opSchemas["events.emit"].parse(rawArgs);
         if (jsonByteLength(a.data ?? null) > LIMITS.eventPayloadBytes) throw new HttpError(413, "Event payload too large");
-        if (!this.events.take(`c:${conn.id}`)) throw new HttpError(429, "Too many events");
+        if (!this.events.take(`u:${user.id}`)) throw new HttpError(429, "Too many events");
         const payload = { name: a.name, data: a.data ?? null, from: user.id, at: Date.now() };
         this.broadcast(houseId, { t: "ev", house: houseId, name: "event", data: payload }, conn);
         return { delivered: true };
@@ -232,8 +263,8 @@ export class Hub {
 
   private broadcast(houseId: string, msg: unknown, except?: Conn): void {
     const text = JSON.stringify(msg);
-    for (const c of this.rooms.get(houseId) ?? []) {
-      if (c !== except && c.ws.readyState === WebSocket.OPEN) c.ws.send(text);
+    for (const c of [...(this.rooms.get(houseId) ?? [])]) {
+      if (c !== except) this.deliver(c.ws, text);
     }
   }
 
@@ -252,9 +283,15 @@ export class Hub {
   }
 
   private ping(): void {
+    const now = Date.now();
+    const live = this.db.prepare("SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?");
     for (const c of this.conns) {
       if (!c.alive) {
         c.ws.terminate();
+        continue;
+      }
+      if (!live.get(c.sessionHash, now)) {
+        c.ws.close(4001, "session ended");
         continue;
       }
       c.alive = false;

@@ -42,6 +42,10 @@ export interface Config {
   /** How long a frame capability URL stays valid. */
   frameTtlMs: number;
   signupsPerIpPerHour: number;
+  /** Trust X-Forwarded-For from exactly one reverse proxy in front of the server. */
+  trustProxy: boolean;
+  /** Run the check browser with Chromium's sandbox. Only disable for local dev as root. */
+  checkerSandbox: boolean;
   agent: AgentConfig;
 }
 
@@ -90,6 +94,8 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     secureCookies: overrides.secureCookies ?? platformOrigin.startsWith("https://"),
     frameTtlMs: overrides.frameTtlMs ?? 6 * 60 * 60 * 1000,
     signupsPerIpPerHour: overrides.signupsPerIpPerHour ?? Number(process.env.SIGNUPS_PER_IP_PER_HOUR ?? 5),
+    trustProxy: overrides.trustProxy ?? process.env.TRUST_PROXY === "1",
+    checkerSandbox: overrides.checkerSandbox ?? process.env.CHECKER_NO_SANDBOX !== "1",
     agent: { ...agentDefaults, ...overrides.agent },
   };
 }

@@ -28,7 +28,10 @@ import {
 
 export function registerApi(router: Router, svc: Services): void {
   const { db, houses, runs, hub, cfg } = svc;
-  const loginLimiter = new RateLimiter(10, 10 / 60); // 10 attempts, refilling 10/min
+  // Only failed logins are charged, per (address, username) and per address, so an
+  // attacker elsewhere can't lock a user out of their own account.
+  const failedPairLimiter = new RateLimiter(10, 1 / 60);
+  const failedIpLimiter = new RateLimiter(30, 30 / 60);
   const signupLimiter = new RateLimiter(cfg.signupsPerIpPerHour, cfg.signupsPerIpPerHour / 3600);
   const writeLimiter = new RateLimiter(60, 1);
 
@@ -52,7 +55,7 @@ export function registerApi(router: Router, svc: Services): void {
 
   router.add("POST", "/api/auth/signup", async (ctx) => {
     const body = await parseBody(ctx, z.object({ username: usernameSchema, password: passwordSchema, displayName: displayNameSchema }));
-    if (!signupLimiter.take(clientIp(ctx.req))) throw new HttpError(429, "Too many new accounts from here. Try later.");
+    if (!signupLimiter.take(clientIp(ctx.req, cfg.trustProxy))) throw new HttpError(429, "Too many new accounts from here. Try later.");
     if (db.prepare("SELECT 1 FROM users WHERE username = ?").get(body.username)) {
       throw new HttpError(409, "That username is taken");
     }
@@ -73,12 +76,18 @@ export function registerApi(router: Router, svc: Services): void {
   router.add("POST", "/api/auth/login", async (ctx) => {
     const body = await parseBody(ctx, z.object({ username: z.string().max(100), password: z.string().max(200) }));
     const username = body.username.trim().toLowerCase();
-    if (!loginLimiter.take(`ip:${clientIp(ctx.req)}`) || !loginLimiter.take(`user:${username}`)) {
+    const ip = clientIp(ctx.req, cfg.trustProxy);
+    const pairKey = `${ip}|${username}`;
+    if (!failedPairLimiter.peek(pairKey) || !failedIpLimiter.peek(ip)) {
       throw new HttpError(429, "Too many attempts. Wait a minute and try again.");
     }
     const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username) as UserRow | undefined;
     const ok = await verifyPassword(body.password, user?.password_hash ?? (await getDummyHash()));
-    if (!user || !ok) throw new HttpError(401, "Wrong username or password");
+    if (!user || !ok) {
+      failedPairLimiter.take(pairKey);
+      failedIpLimiter.take(ip);
+      throw new HttpError(401, "Wrong username or password");
+    }
     const session = createSession(db, user.id);
     ctx.res.setHeader("Set-Cookie", sessionCookie(session.token, session.expiresAt, cfg.secureCookies));
     return { user: publicUser(user) };
@@ -142,6 +151,25 @@ export function registerApi(router: Router, svc: Services): void {
     limitWrites(user);
     const { house } = houses.requireMember(houseParam(ctx), user.id);
     return houses.createInvite(house.id, user.id);
+  });
+
+  router.add("DELETE", "/api/houses/:id/invites", (ctx) => {
+    const user = requireUser(ctx);
+    const house = houses.requireOwner(houseParam(ctx), user.id);
+    return { revoked: houses.revokeInvites(house.id) };
+  });
+
+  router.add("GET", "/api/houses/:id/bans", (ctx) => {
+    const user = requireUser(ctx);
+    const house = houses.requireOwner(houseParam(ctx), user.id);
+    return { removed: houses.listBans(house.id) };
+  });
+
+  router.add("DELETE", "/api/houses/:id/bans/:userId", (ctx) => {
+    const user = requireUser(ctx);
+    const house = houses.requireOwner(houseParam(ctx), user.id);
+    houses.unban(house.id, ctx.params.userId ?? "");
+    return { ok: true };
   });
 
   router.add("GET", "/api/invites/:token", (ctx) => {

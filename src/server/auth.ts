@@ -90,8 +90,14 @@ export function parseCookies(header: string | undefined): Record<string, string>
     const idx = part.indexOf("=");
     if (idx < 0) continue;
     const name = part.slice(0, idx).trim();
-    const value = part.slice(idx + 1).trim();
-    if (name && !(name in out)) out[name] = decodeURIComponent(value);
+    const raw = part.slice(idx + 1).trim();
+    let value: string;
+    try {
+      value = decodeURIComponent(raw);
+    } catch {
+      continue; // malformed encoding: ignore the cookie rather than throw
+    }
+    if (name && !(name in out)) out[name] = value;
   }
   return out;
 }

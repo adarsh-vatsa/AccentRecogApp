@@ -18,7 +18,9 @@ export interface TestApp {
   close(): Promise<void>;
 }
 
-export async function startApp(opts: { model?: ModelClient; checker?: Checker; agent?: Partial<Config["agent"]> } = {}): Promise<TestApp> {
+export async function startApp(
+  opts: { model?: ModelClient; checker?: Checker; agent?: Partial<Config["agent"]>; config?: Partial<Config> } = {},
+): Promise<TestApp> {
   const platformPort = portCursor++;
   const housePort = portCursor++;
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "dc-test-"));
@@ -30,6 +32,7 @@ export async function startApp(opts: { model?: ModelClient; checker?: Checker; a
     houseDomain: `houses.localhost:${housePort}`,
     secret: crypto.randomBytes(32),
     signupsPerIpPerHour: 10_000,
+    ...opts.config,
     agent: { ...loadConfig({ dataDir, secret: crypto.randomBytes(32) }).agent, ...opts.agent },
   });
   const app = createApp(cfg, { model: opts.model ?? new ScriptedModel([]), checker: opts.checker ?? new FakeChecker() });

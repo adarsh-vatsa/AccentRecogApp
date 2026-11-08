@@ -98,6 +98,16 @@ export async function parseBody<T extends z.ZodType>(ctx: Ctx, schema: T): Promi
   return result.data;
 }
 
-export function clientIp(req: IncomingMessage): string {
+/**
+ * The client's address. Behind a reverse proxy (trustProxy), that's the last entry of
+ * X-Forwarded-For: the one our own proxy appended. Earlier entries are client-supplied.
+ */
+export function clientIp(req: IncomingMessage, trustProxy = false): string {
+  if (trustProxy) {
+    const header = req.headers["x-forwarded-for"];
+    const value = Array.isArray(header) ? header.join(",") : header;
+    const last = value?.split(",").map((s) => s.trim()).filter(Boolean).at(-1);
+    if (last) return last.slice(0, 64);
+  }
   return req.socket.remoteAddress ?? "unknown";
 }

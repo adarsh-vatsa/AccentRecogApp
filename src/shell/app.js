@@ -438,7 +438,8 @@ async function renderHouse(houseId) {
     openDrawer("build");
     const area = drawerBody.querySelector("textarea");
     if (area) {
-      area.value = `Fix these errors:\n${view.reports.slice(-8).map((r) => `- ${r.detail}`).join("\n")}`;
+      const lines = view.reports.filter((r) => r.kind !== "console").slice(-5).map((r) => `- ${r.detail.replace(/\s+/g, " ").slice(0, 200)}`);
+      area.value = `Fix these errors the house reported:\n${lines.join("\n")}`;
       area.focus();
     }
   });
@@ -479,7 +480,7 @@ async function renderHouse(houseId) {
         break;
       case "version":
         view.liveSha = msg.data.sha;
-        if (msg.data.by?.id !== me.id) toast(`${msg.data.by?.name ?? "Someone"} changed the house: ${msg.data.message}`);
+        if (msg.data.by?.id !== me.id) toast(`${msg.data.by?.name ?? "Someone"} changed the house. See History for details.`);
         if (!view.previewRun) mountFrame(view.liveSha);
         else setBanner();
         if (view.drawer === "history") loadVersions();
@@ -573,7 +574,7 @@ async function renderHouse(houseId) {
     view.frame = mountHouseFrame({
       container: frameWrap,
       url,
-      context: { house: { id: houseId, name: view.house.name }, me: { id: me.id, name: me.name, username: me.username }, members: view.members, online: view.online },
+      context: { house: { id: houseId, name: view.house.name }, me: { id: me.id, name: me.name }, members: view.members, online: view.online },
       request: (op, args) => rt.req(houseId, op, args),
       onReport: (r) => {
         view.reports.push(r);
@@ -814,23 +815,88 @@ async function renderHouse(houseId) {
           : null,
       ),
     );
-    const footer =
-      view.role === "owner"
-        ? h("button", { class: "btn danger", onclick: deleteHouse }, "Delete this house")
-        : h("button", { class: "btn danger", onclick: () => removeMember({ id: me.id, name: me.name }, true) }, "Leave this house");
+    const owner = view.role === "owner";
+    const removedList = h("div", { class: "field" });
+    const footer = owner
+      ? h(
+          "div",
+          { class: "field" },
+          h(
+            "button",
+            {
+              class: "btn",
+              onclick: async () => {
+                if (!confirm("Turn off every invite link for this house? People already inside stay.")) return;
+                try {
+                  const { revoked } = await api("DELETE", `/api/houses/${houseId}/invites`);
+                  toast(`${revoked} invite link${revoked === 1 ? "" : "s"} turned off.`);
+                } catch (err) {
+                  toast(err.message);
+                }
+              },
+            },
+            "Turn off all invite links",
+          ),
+          h("button", { class: "btn danger", onclick: deleteHouse }, "Delete this house"),
+        )
+      : h("button", { class: "btn danger", onclick: () => removeMember({ id: me.id, name: me.name }, true) }, "Leave this house");
     drawerBody.replaceChildren(
       h("div", { class: "field" }, h("span", { class: "muted" }, "Invite links work for 7 days and up to 25 people."), h("div", { class: "row" }, makeInvite, copy), inviteOut),
       ...people,
+      owner ? removedList : null,
       footer,
     );
+    if (owner) loadRemoved(removedList);
+  }
+
+  async function loadRemoved(container) {
+    try {
+      const { removed } = await api("GET", `/api/houses/${houseId}/bans`);
+      if (!removed.length) return;
+      container.replaceChildren(
+        h("span", { class: "muted" }, "Removed. They can't rejoin with an invite until you let them."),
+        ...removed.map((p) =>
+          h(
+            "div",
+            { class: "member" },
+            h(
+              "div",
+              { class: "row spread" },
+              h("span", { text: p.name }),
+              h(
+                "button",
+                {
+                  class: "btn small",
+                  onclick: async () => {
+                    try {
+                      await api("DELETE", `/api/houses/${houseId}/bans/${p.id}`);
+                      toast(`${p.name} can rejoin with an invite now.`);
+                      loadRemoved(container);
+                    } catch (err) {
+                      toast(err.message);
+                    }
+                  },
+                },
+                "Let back in",
+              ),
+            ),
+          ),
+        ),
+      );
+    } catch {
+      /* not critical */
+    }
   }
 
   async function removeMember(m, self = false) {
-    const question = self ? "Leave this house? You'll need a new invite to come back." : `Remove ${m.name} from the house?`;
+    const question = self
+      ? "Leave this house? You'll need a new invite to come back."
+      : `Remove ${m.name} from the house? Their invite links stop working, and they can't rejoin until you let them back in.`;
     if (!confirm(question)) return;
     try {
       await api("DELETE", `/api/houses/${houseId}/members/${m.id}`);
       if (self) navigate("/");
+      else if (view.drawer === "people") renderPeople();
     } catch (err) {
       toast(err.message);
     }

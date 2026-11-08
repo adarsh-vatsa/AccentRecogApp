@@ -14,6 +14,8 @@ npm run dev
 
 Open http://localhost:4100, sign up, create a house, and open **Build**. To try it with friends locally, use a second browser profile and send yourself the invite link from **Invite**.
 
+The builder's `check` step renders houses in a headless Chromium with its sandbox on. That needs `npx playwright install chromium` once, and a non-root user. In a root-only dev container, start with `CHECKER_NO_SANDBOX=1`, and never do that in production.
+
 Houses are served from `http://<house-id>.houses.localhost:4101`. Chrome, Edge and Firefox resolve `*.localhost` to your machine automatically. Safari doesn't, so use another browser for local development.
 
 `npm test` runs the suite: security boundaries, versioning and merges, the agent loop with a scripted model, and end-to-end tests in headless Chromium.
@@ -55,7 +57,7 @@ Three layers, as in the design:
 `POST /api/houses/:id/runs` starts a builder run (`src/server/agent/`):
 
 1. The run gets its own git worktree, branched from the live version.
-2. Claude (`claude-opus-5-5`, adaptive thinking, streaming) works in a tool loop with `list_files`, `read_file`, `write_file`, `edit_file`, `delete_file` and `check`. `check` commits the work in progress and renders it in headless Chromium at desktop and phone sizes, inside the real sandbox with two simulated members. It returns errors, blocked requests and screenshots, so the builder can see what it made.
+2. Claude (`claude-opus-5-5`, adaptive thinking, streaming, server-side refusal fallback) works in a tool loop with `list_files`, `read_file`, `write_file`, `edit_file`, `delete_file` and `check`. `check` commits the work in progress and renders it in headless Chromium at desktop and phone sizes, inside the real sandbox with two simulated members. It returns errors, blocked requests and screenshots, so the builder can see what it made.
 3. The result is a preview only the requester sees. It's wired to the house's real chat and state.
 4. **Ship** merges the result into `main` with a three-way merge. Two people building at once both land if they touched different things. If they edited the same lines, the second gets a conflict instead of silently overwriting. Every open copy of the house reloads to the new version.
 
@@ -89,6 +91,9 @@ The full reference is in [`src/house-sdk/SDK.md`](src/house-sdk/SDK.md). The bui
 | `AGENT_MODEL` / `AGENT_EFFORT` | `claude-opus-5-5` / `high` | |
 | `AGENT_MAX_TURNS` / `AGENT_MAX_CHECKS` | `40` / `6` | Per-run limits |
 | `AGENT_RUNS_PER_USER_PER_DAY` | `30` | Cost control |
+| `TRUST_PROXY` | off | Set to `1` behind exactly one reverse proxy so rate limits see real client addresses |
+| `SIGNUPS_PER_IP_PER_HOUR` | `5` | |
+| `CHECKER_NO_SANDBOX` | off | Set to `1` only for local development as root, where Chromium's sandbox can't start |
 
 **Production requirement:** `HOUSE_DOMAIN` must be a different registrable domain from the shell, the way Google serves user content from googleusercontent.com. For example, the app is on `app.example.com` and houses are on `*.examplehouses.net`, with a wildcard TLS certificate. Putting houses on a subdomain of the app's domain weakens the isolation. See [SECURITY.md](SECURITY.md).
 

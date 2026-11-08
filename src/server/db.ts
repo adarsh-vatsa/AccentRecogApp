@@ -47,6 +47,15 @@ CREATE TABLE IF NOT EXISTS invites (
   uses INTEGER NOT NULL DEFAULT 0
 );
 
+-- People an owner removed. They can't come back through an invite until allowed.
+CREATE TABLE IF NOT EXISTS bans (
+  house_id TEXT NOT NULL REFERENCES houses(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  banned_by TEXT NOT NULL REFERENCES users(id),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (house_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   house_id TEXT NOT NULL REFERENCES houses(id) ON DELETE CASCADE,

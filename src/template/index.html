@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>House</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="/_sdk/house.js"></script>
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="people" aria-label="People in this house">
+        <h2 class="people-title">In the house</h2>
+        <ul id="people" class="people-list"></ul>
+      </aside>
+      <main class="room">
+        <header class="room-header">
+          <div>
+            <h1 id="house-name">Living room</h1>
+            <p class="room-hint">Ask the builder to turn this room into anything.</p>
+          </div>
+          <span id="online-count" class="online-count"></span>
+        </header>
+        <ol id="messages" class="messages" aria-live="polite"></ol>
+        <form id="composer" class="composer" autocomplete="off">
+          <textarea id="input" rows="1" placeholder="Say something…" maxlength="4000" aria-label="Message"></textarea>
+          <button type="submit" id="send">Send</button>
+        </form>
+      </main>
+    </div>
+  </body>
+</html>

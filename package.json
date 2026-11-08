@@ -1,0 +1,27 @@
+{
+  "name": "dynamic-chats",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Group chats where every group owns a live, agent-editable interface.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "node --disable-warning=ExperimentalWarning --import tsx src/server/main.ts",
+    "start": "node --disable-warning=ExperimentalWarning --import tsx src/server/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --disable-warning=ExperimentalWarning --import tsx --test --test-concurrency=1 test/*.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.6.0",
+    "ws": "^8.22.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
